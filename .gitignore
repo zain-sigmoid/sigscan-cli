@@ -3,6 +3,7 @@ __pycache__/
 .env
 
 .DS_Store
+.vscode
 scancode_report.json
 semgrep_output.json
 out.json
