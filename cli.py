@@ -1,11 +1,18 @@
-# cli.py
 from __future__ import annotations
-import argparse, asyncio, json, os, sys, tempfile
+import logging
+import traceback
 from pathlib import Path
-from dataclasses import is_dataclass, asdict
-from tqdm import tqdm
+from importlib import metadata
 from termcolor import colored, cprint
 from typing import List, Optional, Set
+from dataclasses import is_dataclass, asdict
+from utils.logs_service.logger import AppLogger
+import argparse, asyncio, json, os, sys, tempfile
+
+AppLogger.init(
+    level=logging.INFO,
+    log_to_file=True,
+)
 from core.interfaces import analyzer_registry
 from utils.prod_shift import Extract
 from core.models import AnalysisConfiguration, SeverityLevel
@@ -23,6 +30,49 @@ from analyzers.maintainability_analyzer import MaintainabilityAnalyzer
 from analyzers.performance_analyzer import PerformanceAnalyzer
 from analyzers.compliance_analyzer import ComplianceAnalyzer
 from analyzers.secrets_analyzer import HardcodedSecretsAnalyzer
+
+logger = AppLogger.get_logger(__name__)
+LOG_FILE = Path(__file__).resolve().parent / "logs" / "sigscan.log"
+
+
+def _get_version() -> str:
+    """Return the CLI version from installed metadata or pyproject."""
+    try:
+        return "sigscan version " + metadata.version("sigscan")
+    except metadata.PackageNotFoundError:
+        try:
+            import tomllib  # type: ignore
+        except ModuleNotFoundError:
+            import tomli as tomllib
+
+        if tomllib:
+            try:
+                data = tomllib.loads(Path("pyproject.toml").read_text())
+                return "sigscan version " + str(
+                    data.get("project", {}).get("version", "unknown")
+                )
+            except Exception:
+                pass
+
+    return "unknown"
+
+
+def _read_log_file(path: Path) -> str:
+    if not path.exists():
+        logger.error(f"Log file not found at {path}")
+        return False
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        logger.error(f"Unable to read log file {path}: {exc}")
+        return False
+
+
+def _set_quiet_logging():
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
+    for handler in root_logger.handlers:
+        handler.setLevel(logging.WARNING)
 
 
 def initialize_analyzers() -> None:
@@ -149,10 +199,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--all-analyzers", action="store_true", help="Enable all available analyzers."
     )
-    p.add_argument("--parallel", action="store_true")
-    p.add_argument("--include-low-confidence", action="store_true")
-    p.add_argument("--timeout", type=int, default=600)
-    p.add_argument("--max-findings", type=int, default=500)
+    p.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Does Parallel Processing for faster execution",
+    )
+    p.add_argument(
+        "--include-low-confidence",
+        action="store_true",
+        help="Includes findings with Low Confidence",
+    )
+    p.add_argument(
+        "--timeout", type=int, default=900, help="Waiting time in sec, default 900"
+    )
+    p.add_argument(
+        "--max-findings",
+        type=int,
+        default=1000,
+        help="Finding threshold for individual analyzer, default 1000",
+    )
     p.add_argument(
         "-o",
         "--out",
@@ -160,8 +225,31 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Write JSON result to FILE (no stdout on success).",
     )
     p.add_argument("--compact", action="store_true", help="Minified JSON.")
-    p.add_argument("--no-progress", action="store_true")
-    p.add_argument("-v", "--verbose", action="count", default=0)
+    p.add_argument(
+        "--no-progress", action="store_true", help="Hide Analyzer progress information"
+    )
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Use for checking error i.e. traceback",
+    )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Only show warnings and errors logs, hides info logs.",
+    )
+    p.add_argument(
+        "--logs",
+        action="store_true",
+        help="Print the previous saved logs from log file.",
+    )
+    p.add_argument(
+        "--version",
+        action="store_true",
+        help="Show the sigscan CLI version and exit.",
+    )
     p.add_argument(
         "--list-analyzers",
         action="store_true",
@@ -170,33 +258,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
     # only enforce -o/--out if we are not listing analyzers
     args = p.parse_args(argv)
-    if not args.list_analyzers and not args.out:
+    if not (args.list_analyzers or args.logs or args.version) and not args.out:
         p.error("the following arguments are required: -o/--out")
     return args
 
 
 class TqdmProgress:
-    """Adapter that matches engine's progress_cb signature."""
+    """Simple textual progress showing completed analyzers out of total."""
 
     def __init__(self, show: bool, desc: str = "Analyzing"):
-        self.bar = tqdm(
-            total=1,  # never zero
-            desc=desc,
-            unit="",
-            ncols=100,
-            dynamic_ncols=True,
-            leave=True,
-            disable=not show,
-            colour="cyan",  # visible bar color
-            bar_format="{desc} {n_fmt}/{total_fmt} |{bar}| {elapsed}<{remaining}",
-        )
+        self.show = show
+        self.total = 0
+        self.completed = 0
+        self.current_stage = desc
         self.total_known = False
 
     def __call__(self, increment=1, stage=None, total_analyzers=None):
         if total_analyzers is not None and not self.total_known:
-            self.bar.total = max(1, int(total_analyzers))
+            self.total = max(1, int(total_analyzers))
             self.total_known = True
-            self.bar.refresh()
+
         if stage:
             if "finished" in stage:
                 color = "green"
@@ -204,12 +285,22 @@ class TqdmProgress:
                 color = "yellow"
             else:
                 color = "cyan"
-            self.bar.set_description_str(colored(f"[{stage}]", color, attrs=["bold"]))
+            self.current_stage = colored(f"[{stage}]", color, attrs=["bold"])
+
         if increment:
-            self.bar.update(increment)
+            next_count = self.completed + increment
+            self.completed = min(next_count, self.total or next_count)
+
+        if self.show:
+            total_display = self.total if self.total else "?"
+            print(
+                f"{self.current_stage} {self.completed}/{total_display} analyzers completed",
+                flush=True,
+            )
 
     def close(self):
-        self.bar.close()
+        if self.show:
+            print()
 
 
 # return report
@@ -217,6 +308,9 @@ async def _run_async(engine, cfg, show_progress: bool):
     tprog = TqdmProgress(show_progress, desc=colored("[starting]", "cyan"))
     try:
         report = await engine.analyze(cfg, progress_cb=tprog)
+    except asyncio.CancelledError:
+        logger.info("Analysis cancelled by user.")
+        raise
     finally:
         tprog.close()
     return report
@@ -224,29 +318,40 @@ async def _run_async(engine, cfg, show_progress: bool):
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.version:
+        print(_get_version())
+        return 0
+
+    if args.logs:
+        logs = _read_log_file(LOG_FILE)
+        if logs:
+            print(logs)
+        return 0
+
+    if args.quiet:
+        _set_quiet_logging()
+
     exts = set(Extract.CODE_EXTS)
     initialize_analyzers()
     if args.list_analyzers:
-        for (
-            name
-        ) in (
-            analyzer_registry.list_analyzer_names()
-        ):  # implement list_names() on your registry if not present
+        for name in analyzer_registry.list_analyzer_names():
             print(name)
         return 0
     target_path = os.path.abspath(args.path)
     reader_files, count = collect_code_files(target_path)
-    cprint(
-        f"Total Files for Analysis : {count}",
-        "yellow",
-    )
+    logger.info(f"Total Files for Analysis : {count}")
+    if args.quiet:
+        cprint(f"Total Files for Analysis : {count}", "green")
     if not reader_files:
-        cprint("⚠️ No Python files found after filtering.", "yellow")
+        logger.warning("⚠️ No Python files found after filtering.")
         return 0
 
     if not os.path.exists(target_path):
-        eprint(f"Error: path not found: {target_path}")
+        logger.error(f"Error: path not found: {target_path}")
         return 2
+
+    if not args.verbose:
+        logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
     # Build configuration equivalent to Streamlit
     enabled_analyzers: Set[str] = set(args.analyzer or [])
@@ -276,26 +381,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ImportError("Engine import path not set. Update cli.py imports.")
         engine = Engine()  # adjust if needs params
     except Exception as e:
-        eprint(f"Error: cannot construct analysis engine: {e}")
+        logger.error(f"Error: cannot construct analysis engine: {e}")
         if args.verbose:
-            import traceback
-
             traceback.print_exc()
         return 1
 
     # Run analysis (async)
     try:
+        if args.quiet and args.no_progress:
+            cprint("Running", "green")
         report = asyncio.run(
             _run_async(engine, cfg, show_progress=not args.no_progress)
         )
-    except KeyboardInterrupt:
-        eprint("Interrupted.")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Interrupted.")
         return 130
     except Exception as e:
-        eprint(f"Error during analysis: {e}")
+        logger.error(f"Error during analysis: {e}")
         if args.verbose:
-            import traceback
-
             traceback.print_exc()
         return 1
 
@@ -331,14 +434,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Write JSON file
     try:
         write_json_file(args.out, payload, compact=args.compact)
-        cprint(f"✅ Findings saved to {args.out}", "green", attrs=["bold"])
+        logger.info(f"✅ Findings saved to {args.out}")
+        if args.quiet:
+            cprint(f"✅ Findings saved to {args.out}", "green")
     except Exception as e:
-        cprint(
-            f"❌ Failed to write output file '{args.out}': {e}", "red", attrs=["bold"]
+        logger.error(
+            f"❌ Failed to write output file '{args.out}': {e}, use verbose to check"
         )
         if args.verbose:
-            import traceback
-
             traceback.print_exc()
         return 1
 
