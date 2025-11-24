@@ -40,7 +40,8 @@ sigscan = "cli:main"
 
 [tool.setuptools]
 # Explicitly list your packages to avoid auto-discovery errors
-packages = ["analyzers", "core", "utils"]
+# Include nested utils.logs_service so CLI imports work after installation.
+packages = ["analyzers", "core", "utils", "utils.logs_service"]
 
 # Also install the single-file top-level module cli.py
 py-modules = ["cli"]
@@ -51,4 +52,3 @@ py-modules = ["cli"]
 analyzers = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.txt"]
 core       = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.txt"]
 utils      = ["**/*.json", "**/*.yaml", "**/*.yml", "**/*.txt"]
-
