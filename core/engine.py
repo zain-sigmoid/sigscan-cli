@@ -72,6 +72,8 @@ class UnifiedAnalysisEngine:
                 f"Running {len(analyzers)} analyzers: {[a.get_name() for a in analyzers]}"
             )
             logger.info(f"Parallel Execution:{config.parallel_execution}")
+            if progress_cb:
+                progress_cb(increment=0, total_analyzers=len(analyzers))
             # Run analysis modules
             if config.parallel_execution:
                 analysis_results = await self._run_parallel_analysis(
@@ -96,6 +98,9 @@ class UnifiedAnalysisEngine:
 
             return report
 
+        except asyncio.CancelledError:
+            logger.info("Analysis cancelled by user.")
+            raise
         except Exception as e:
             traceback.print_exc()
             logger.error(f"Analysis failed: {str(e)}")
@@ -218,6 +223,14 @@ class UnifiedAnalysisEngine:
             return [
                 task.result() for task in tasks if task.done() and not task.exception()
             ]
+        except asyncio.CancelledError:
+            # Propagate cancellation but make sure tasks are cleaned up
+            logger.error("Analysis interrupted by user.")
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _run_sequential_analysis(
         self,
