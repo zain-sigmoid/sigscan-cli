@@ -71,7 +71,7 @@ class UnifiedAnalysisEngine:
             logger.info(
                 f"Running {len(analyzers)} analyzers: {[a.get_name() for a in analyzers]}"
             )
-
+            logger.info(f"Parallel Execution:{config.parallel_execution}")
             # Run analysis modules
             if config.parallel_execution:
                 analysis_results = await self._run_parallel_analysis(

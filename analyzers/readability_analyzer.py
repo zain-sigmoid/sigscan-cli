@@ -14,6 +14,7 @@ import traceback
 from collections import Counter
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
+from utils.logs_service.logger import AppLogger
 from core.interfaces import QualityAnalyzer
 from core.file_utils import find_python_files
 from core.models import (
@@ -27,7 +28,7 @@ from core.models import (
     CodeLocation,
 )
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 class ReadabilityAnalyzer(QualityAnalyzer):
@@ -136,7 +137,7 @@ class ReadabilityAnalyzer(QualityAnalyzer):
             analyzer_config = config.analyzer_configs.get(
                 self.name, self.get_default_config()
             )
-            active = self._check_pylint_status()
+            active = await self._check_pylint_status()
             if not active:
                 logger.error(
                     "Aborting Readability Ananlysis, pylint not found in the environment"
@@ -203,22 +204,25 @@ class ReadabilityAnalyzer(QualityAnalyzer):
                 findings=[], metrics=metrics, metadata={"error": str(e)}
             )
 
-    def _check_pylint_status(
+    async def _check_pylint_status(
         self,
     ) -> bool:
         #  Check if pylint is available
-        result = subprocess.run(
-            ["pylint", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5,
-        )
-
-        if result.returncode != 0:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pylint",
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning("Pylint not found. Install with: pip install pylint")
+                return False
+            return True
+        except FileNotFoundError:
             logger.warning("Pylint not found. Install with: pip install pylint")
             return False
-
-        return True
 
     def _initialize_readability_patterns(self):
         """Initialize readability issue patterns and mappings."""
@@ -448,24 +452,26 @@ class ReadabilityAnalyzer(QualityAnalyzer):
             timeout = config.get("pylint_timeout", 60)
 
             # Run pylint with JSON output
-            result = subprocess.run(
-                [
-                    "pylint",
-                    os.fspath(file_path),
-                    "-f",
-                    "json2",
-                    "--disable=all",
-                    "--enable=" + ",".join(self._get_issues_to_report()),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
+            proc = await asyncio.create_subprocess_exec(
+                "pylint",
+                os.fspath(file_path),
+                "-f",
+                "json2",
+                "--disable=all",
+                "--enable=" + ",".join(self._get_issues_to_report()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
-            if result.stdout:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+            output_text = (stdout or b"").decode()
+            if not output_text and stderr:
+                output_text = stderr.decode()
+
+            if output_text:
                 try:
-                    pylint_output = json.loads(result.stdout)
+                    pylint_output = json.loads(output_text)
                     pylint_stats = pylint_output.get("statistics", {})
                     self.scores.append(pylint_stats.get("score", 0))
                     msg_counts = pylint_stats.get("messageTypeCount", {})

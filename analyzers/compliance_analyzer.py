@@ -12,6 +12,7 @@ import traceback
 from typing import List, Dict, Any
 from pathlib import Path
 from collections import defaultdict
+from utils.logs_service.logger import AppLogger
 from core.file_utils import find_python_files
 from core.interfaces import ComplianceAnalyzer
 from core.models import (
@@ -25,7 +26,7 @@ from core.models import (
     CodeLocation,
 )
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 class ComplianceAnalyzer(ComplianceAnalyzer):
@@ -134,24 +135,24 @@ class ComplianceAnalyzer(ComplianceAnalyzer):
             findings.append(unified_finding)
         return findings
 
-    def run_semgrep_rules(self, target_path, rules_path="utils/privacy_rules.yml"):
+    async def run_semgrep_rules(
+        self, target_path, rules_path="utils/privacy_rules.yml"
+    ):
         """Runs semgrep with custom rules for data privacy checks."""
         try:
-            subprocess.run(
-                [
-                    "semgrep",
-                    "scan",
-                    target_path,
-                    "--config",
-                    rules_path,
-                    "--no-git-ignore",
-                    "--json-output=semgrep_output.json",
-                    "--quiet",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            proc = await asyncio.create_subprocess_exec(
+                "semgrep",
+                "scan",
+                target_path,
+                "--config",
+                rules_path,
+                "--no-git-ignore",
+                "--json-output=semgrep_output.json",
+                "--quiet",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
+            await proc.wait()
         except subprocess.CalledProcessError:
             traceback.print_exc()
 
@@ -186,19 +187,17 @@ class ComplianceAnalyzer(ComplianceAnalyzer):
         # Run ScanCode with output to file
         output_file = "scancode_report.json"
         try:
-            subprocess.run(
-                [
-                    "scancode",
-                    "-clpeui",
-                    "--json-pp",
-                    output_file,
-                    codebase_path,
-                    "--quiet",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            proc = await asyncio.create_subprocess_exec(
+                "scancode",
+                "-clpeui",
+                "--json-pp",
+                output_file,
+                codebase_path,
+                "--quiet",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
             )
+            await proc.wait()
         except subprocess.CalledProcessError as e:
             traceback.print_exc()
             self.findings.append(
@@ -493,7 +492,7 @@ class ComplianceAnalyzer(ComplianceAnalyzer):
     async def check_data_privacy_compliance(self, codebase_path):
         """Checks for data privacy compliance violations (GDPR, CCPA)."""
         # Run semgrep rules defined for privacy
-        self.run_semgrep_rules(codebase_path)
+        await self.run_semgrep_rules(codebase_path)
         self.process_semgrep_findings()
 
     def _create_empty_result(self) -> AnalysisResult:

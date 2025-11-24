@@ -3,11 +3,10 @@ Tool Runner Utility for Code Analysis Tool
 Safely executes external analysis tools with timeout and error handling.
 """
 
+import asyncio
 import subprocess
-import signal
 import os
 import shutil
-import tempfile
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
@@ -61,7 +60,7 @@ class ToolRunner:
         """
         return self.tool_cache.get(tool_name, False)
 
-    def run_tool(
+    async def run_tool(
         self,
         tool_name: str,
         args: List[str],
@@ -112,21 +111,39 @@ class ToolRunner:
         env["PYTHONPATH"] = env.get("PYTHONPATH", "") + ":" + str(Path.cwd())
 
         try:
-            # Run the tool with timeout
-            result = subprocess.run(
-                cmd,
-                capture_output=capture_output,
-                text=True,
-                timeout=timeout,
+            stdout_opt = (
+                asyncio.subprocess.PIPE
+                if capture_output
+                else asyncio.subprocess.DEVNULL
+            )
+            stderr_opt = (
+                asyncio.subprocess.PIPE
+                if capture_output
+                else asyncio.subprocess.DEVNULL
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=stdout_opt,
+                stderr=stderr_opt,
                 cwd=cwd,
                 env=env,
             )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                raise ToolTimeoutError(
+                    f"Tool '{tool_name}' timed out after {timeout} seconds"
+                )
 
-            return result
-
-        except subprocess.TimeoutExpired:
-            raise ToolTimeoutError(
-                f"Tool '{tool_name}' timed out after {timeout} seconds"
+            return subprocess.CompletedProcess(
+                cmd,
+                returncode=proc.returncode,
+                stdout=stdout.decode() if stdout else "",
+                stderr=stderr.decode() if stderr else "",
             )
 
         except FileNotFoundError:

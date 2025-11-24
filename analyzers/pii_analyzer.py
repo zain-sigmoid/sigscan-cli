@@ -7,12 +7,13 @@ Ensures compliance with data protection regulations like GDPR, HIPAA, and CCPA.
 import os
 import re
 import ast
+import asyncio
 import logging
 import traceback
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Set, Tuple
+from typing import List, Dict, Any, Optional
 from enum import Enum
-import asyncio
+from utils.logs_service.logger import AppLogger
 from core.interfaces import ComplianceAnalyzer
 from core.file_utils import find_python_files
 from core.models import (
@@ -27,7 +28,7 @@ from core.models import (
     ComplianceStatus,
 )
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 class PIIType(Enum):
@@ -119,8 +120,6 @@ class PIIAnalyzer(ComplianceAnalyzer):
             Dictionary mapping framework names to compliance status
         """
         # Run analysis first to get findings
-        import asyncio
-
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         result = loop.run_until_complete(self.analyze(config))

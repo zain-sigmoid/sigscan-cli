@@ -7,7 +7,6 @@ import os
 import ast
 import json
 import asyncio
-import logging
 import traceback
 import hashlib
 from typing import List, Dict, Any
@@ -16,6 +15,7 @@ from core.tool_runner import ToolRunner
 from core.file_utils import find_python_files
 from core.interfaces import QualityAnalyzer
 from utils.mi import MIDiagnose
+from utils.logs_service.logger import AppLogger
 from utils.analyze import analyze_function_in_file
 from utils.duplicate_code import run_jscpd_analysis
 from core.models import (
@@ -29,7 +29,7 @@ from core.models import (
     CodeLocation,
 )
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 class MaintainabilityAnalyzer(QualityAnalyzer):
@@ -164,7 +164,7 @@ class MaintainabilityAnalyzer(QualityAnalyzer):
         """Run radon for complexity and maintainability analysis."""
         try:
             # Cyclomatic Complexity
-            cc_result = self.tool_runner.run_tool(
+            cc_result = await self.tool_runner.run_tool(
                 "radon", ["cc", path, "--json"], capture_output=True
             )
             if cc_result.returncode == 0 and cc_result.stdout:
@@ -173,7 +173,7 @@ class MaintainabilityAnalyzer(QualityAnalyzer):
                 await self._calculate_complexity_rank(cc_data=cc_data)
 
             # Maintainability Index
-            mi_result = self.tool_runner.run_tool(
+            mi_result = await self.tool_runner.run_tool(
                 "radon", ["mi", path, "--json"], capture_output=True
             )
             if mi_result.returncode == 0 and mi_result.stdout:

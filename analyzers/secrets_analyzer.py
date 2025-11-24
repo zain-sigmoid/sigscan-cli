@@ -4,15 +4,16 @@ Extracts analysis logic from UI components.
 """
 
 # Flake8: noqa: E501
+import asyncio
 import subprocess
 import json
 import os
 import tempfile
-import logging
 import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+from utils.logs_service.logger import AppLogger
 from utils.prod_shift import ensure_gitleaks
 from core.interfaces import SecurityAnalyzer, AnalysisResult
 from core.models import (
@@ -26,7 +27,7 @@ from core.models import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = AppLogger.get_logger(__name__)
 
 
 class HardcodedSecretsAnalyzer(SecurityAnalyzer):
@@ -81,7 +82,7 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
             )
 
             # Check if Gitleaks is available
-            if not self._check_gitleaks_available():
+            if not await self._check_gitleaks_available():
                 raise RuntimeError("Gitleaks is not installed or not found in PATH")
 
             # Run Gitleaks scan
@@ -110,7 +111,7 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
                 findings=findings,
                 metrics=metrics,
                 metadata={
-                    "gitleaks_version": self._get_gitleaks_version(),
+                    "gitleaks_version": await self._get_gitleaks_version(),
                     "scan_type": "detect",
                 },
             )
@@ -133,29 +134,37 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
                 findings=[], metrics=metrics, metadata={"error": str(e)}
             )
 
-    def _check_gitleaks_available(self) -> bool:
+    async def _check_gitleaks_available(self) -> bool:
         """Check if Gitleaks is available in the system."""
         try:
             gitleaks_bin = ensure_gitleaks()
             self.gitleaks = gitleaks_bin
-            result = subprocess.run(
-                [gitleaks_bin, "version"], capture_output=True, text=True, timeout=10
+            proc = await asyncio.create_subprocess_exec(
+                gitleaks_bin,
+                "version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+            return proc.returncode == 0
+        except (asyncio.TimeoutError, subprocess.TimeoutExpired, FileNotFoundError):
             traceback.print_exc()
             logger.error("Gitleaks error")
             return False
 
-    def _get_gitleaks_version(self) -> Optional[str]:
+    async def _get_gitleaks_version(self) -> Optional[str]:
         """Get Gitleaks version."""
         try:
-            result = subprocess.run(
-                [self.gitleaks, "version"], capture_output=True, text=True, timeout=10
+            proc = await asyncio.create_subprocess_exec(
+                self.gitleaks,
+                "version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            if proc.returncode == 0:
+                return stdout.decode().strip()
+        except (asyncio.TimeoutError, subprocess.TimeoutExpired, FileNotFoundError):
             pass
         return None
 
@@ -179,17 +188,6 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
                 report_path = temp_file.name
             gitleaks_toml_path = "utils/gitleaks.toml"
             gitleaks_toml_path = os.path.abspath(gitleaks_toml_path)
-            # Build Gitleaks command
-            # command = [
-            #     "gitleaks",
-            #     "detect",
-            #     "--source",
-            #     source_path,
-            #     "--report-format",
-            #     "json",
-            #     "--report-path",
-            #     report_path,
-            # ]
             # using gitleaks v8.1+ command which also accepts custom rules
             commandv2 = [
                 self.gitleaks,
@@ -203,22 +201,14 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
                 report_path,
             ]
 
-            # Add --no-git flag if not a git repository
-            # no need in gitleaks v8.1 new command
-            # if not self._is_git_repo(source_path):
-            #     command.append("--no-git")
-
-            # logger.debug(f"Running command: {' '.join(commandv2)}")
-
             cmd = [os.fspath(x) for x in commandv2]
             logger.debug(f"Running gitleaks command:")
-            # Run Gitleaks
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5 minute timeout
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            await asyncio.wait_for(proc.communicate(), timeout=300)
 
             # Read results from report file
             try:
@@ -242,7 +232,7 @@ class HardcodedSecretsAnalyzer(SecurityAnalyzer):
                     os.unlink(report_path)
                 return []
 
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             logger.error("Gitleaks scan timed out")
             return []
         except Exception as e:
